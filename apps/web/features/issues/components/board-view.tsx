@@ -16,6 +16,28 @@ import {
 } from "@dnd-kit/core";
 import { arrayMove } from "@dnd-kit/sortable";
 import { Eye, Loader2, MoreHorizontal } from "lucide-react";
+
+/** Sentinel that triggers `onVisible` when scrolled into view. */
+function InfiniteScrollSentinel({ onVisible, loading }: { onVisible: () => void; loading: boolean }) {
+  const sentinelRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const node = sentinelRef.current;
+    if (!node) return;
+    const observer = new IntersectionObserver(
+      ([entry]) => { if (entry.isIntersecting) onVisible(); },
+      { rootMargin: "100px" },
+    );
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [onVisible]);
+
+  return (
+    <div ref={sentinelRef} className="flex items-center justify-center py-2">
+      {loading && <Loader2 className="size-3 animate-spin text-muted-foreground" />}
+    </div>
+  );
+}
 import type { Issue, IssueStatus } from "@/shared/types";
 import { Button } from "@/components/ui/button";
 import { useLoadMoreDoneIssues } from "@core/issues/mutations";
@@ -111,7 +133,7 @@ export function BoardView({
 }) {
   const sortBy = useViewStore((s) => s.sortBy);
   const sortDirection = useViewStore((s) => s.sortDirection);
-  const { loadMore, hasMore, isLoading: loadingMore } = useLoadMoreDoneIssues();
+  const { loadMore, hasMore, isLoading: loadingMore, doneTotal } = useLoadMoreDoneIssues();
 
   // --- Drag state ---
   const [activeIssue, setActiveIssue] = useState<Issue | null>(null);
@@ -274,19 +296,10 @@ export function BoardView({
             status={status}
             issueIds={columns[status] ?? []}
             issueMap={issueMapRef.current}
+            totalCount={status === "done" ? doneTotal : undefined}
             footer={
               status === "done" && hasMore ? (
-                <button
-                  type="button"
-                  className="mt-1 flex w-full items-center justify-center gap-1.5 rounded-md py-2 text-xs text-muted-foreground hover:bg-accent/60 transition-colors disabled:opacity-50"
-                  onClick={loadMore}
-                  disabled={loadingMore}
-                >
-                  {loadingMore ? (
-                    <Loader2 className="size-3 animate-spin" />
-                  ) : null}
-                  {loadingMore ? "Loading..." : "Load more"}
-                </button>
+                <InfiniteScrollSentinel onVisible={loadMore} loading={loadingMore} />
               ) : undefined
             }
           />

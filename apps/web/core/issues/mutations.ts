@@ -51,7 +51,7 @@ export function useLoadMoreDoneIssues() {
     }
   }, [qc, wsId, doneLoaded, hasMore, isLoading]);
 
-  return { loadMore, hasMore, isLoading };
+  return { loadMore, hasMore, isLoading, doneTotal };
 }
 
 // ---------------------------------------------------------------------------
