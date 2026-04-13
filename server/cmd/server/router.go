@@ -81,8 +81,9 @@ func NewRouter(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus) chi.Route
 	r.Use(middleware.ContentSecurityPolicy)
 	origins := allowedOrigins()
 
-	// Share allowed origins with WebSocket origin checker.
+	// Share allowed origins with WebSocket origin checker and CSP.
 	realtime.SetAllowedOrigins(origins)
+	middleware.InitCSP(origins)
 
 	r.Use(cors.Handler(cors.Options{
 		AllowedOrigins:   origins,
