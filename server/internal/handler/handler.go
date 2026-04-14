@@ -250,6 +250,9 @@ func (h *Handler) requireWorkspaceRole(w http.ResponseWriter, r *http.Request, w
 // as either a member or an agent depending on userType.
 func (h *Handler) isWorkspaceEntity(ctx context.Context, userType, userID, workspaceID string) bool {
 	switch userType {
+	case "member":
+		_, err := h.getWorkspaceMember(ctx, userID, workspaceID)
+		return err == nil
 	case "agent":
 		_, err := h.Queries.GetAgentInWorkspace(ctx, db.GetAgentInWorkspaceParams{
 			ID:          parseUUID(userID),
@@ -257,8 +260,7 @@ func (h *Handler) isWorkspaceEntity(ctx context.Context, userType, userID, works
 		})
 		return err == nil
 	default:
-		_, err := h.getWorkspaceMember(ctx, userID, workspaceID)
-		return err == nil
+		return false
 	}
 }
 
