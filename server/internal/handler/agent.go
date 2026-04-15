@@ -23,7 +23,7 @@ type AgentResponse struct {
 	AvatarURL          *string           `json:"avatar_url"`
 	RuntimeMode        string            `json:"runtime_mode"`
 	RuntimeConfig      any               `json:"runtime_config"`
-	CustomEnv          map[string]string `json:"custom_env"`
+	CustomEnv          map[string]string `json:"custom_env,omitempty"`
 	Visibility         string            `json:"visibility"`
 	Status             string            `json:"status"`
 	MaxConcurrentTasks int32             `json:"max_concurrent_tasks"`
@@ -142,9 +142,11 @@ func taskToResponse(t db.AgentTaskQueue) AgentTaskResponse {
 
 func (h *Handler) ListAgents(w http.ResponseWriter, r *http.Request) {
 	workspaceID := resolveWorkspaceID(r)
-	if _, ok := h.workspaceMember(w, r, workspaceID); !ok {
+	member, ok := h.workspaceMember(w, r, workspaceID)
+	if !ok {
 		return
 	}
+	userID := requestUserID(r)
 
 	var agents []db.Agent
 	var err error
@@ -181,6 +183,10 @@ func (h *Handler) ListAgents(w http.ResponseWriter, r *http.Request) {
 		if skills, ok := skillMap[resp.ID]; ok {
 			resp.Skills = skills
 		}
+		// Redact custom_env for users who are not the agent owner or workspace owner/admin.
+		if !canViewAgentEnv(a, userID, member.Role) {
+			redactEnv(&resp)
+		}
 		visible = append(visible, resp)
 	}
 
@@ -205,6 +211,15 @@ func (h *Handler) GetAgent(w http.ResponseWriter, r *http.Request) {
 			resp.Skills[i] = skillToResponse(s)
 		}
 	}
+
+	// Redact custom_env for users who are not the agent owner or workspace owner/admin.
+	userID := requestUserID(r)
+	if member, ok := ctxMember(r.Context()); ok {
+		if !canViewAgentEnv(agent, userID, member.Role) {
+			redactEnv(&resp)
+		}
+	}
+
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -313,6 +328,22 @@ type UpdateAgentRequest struct {
 	Visibility         *string            `json:"visibility"`
 	Status             *string            `json:"status"`
 	MaxConcurrentTasks *int32             `json:"max_concurrent_tasks"`
+}
+
+// canViewAgentEnv checks whether the requesting user is allowed to see the
+// agent's custom environment variables. Only the agent owner or workspace
+// owner/admin may view them; for everyone else the field is redacted.
+func canViewAgentEnv(agent db.Agent, userID string, memberRole string) bool {
+	if roleAllowed(memberRole, "owner", "admin") {
+		return true
+	}
+	return uuidToString(agent.OwnerID) == userID
+}
+
+// redactEnv clears custom_env from the response when the caller is not
+// authorised to view it.
+func redactEnv(resp *AgentResponse) {
+	resp.CustomEnv = nil
 }
 
 // canManageAgent checks whether the current user can update or archive an agent.
