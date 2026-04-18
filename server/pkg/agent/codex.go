@@ -20,6 +20,37 @@ var codexBlockedArgs = map[string]blockedArgMode{
 	"--listen": blockedWithValue, // stdio:// transport for daemon communication
 }
 
+// extractCodexModelArg pulls `-m <v>`, `--model <v>`, and `--model=<v>` out of
+// user-supplied custom_args and returns the model plus the remaining args.
+// Codex's `app-server` subcommand does not accept these flags — the model
+// belongs in the `thread/start` JSON-RPC payload. If multiple model specifiers
+// are present, the last one wins. If the flag appears without a value, it is
+// dropped silently (malformed input).
+func extractCodexModelArg(args []string, logger *slog.Logger) (model string, remaining []string) {
+	if len(args) == 0 {
+		return "", args
+	}
+	remaining = make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "-m" || arg == "--model":
+			if i+1 < len(args) {
+				model = args[i+1]
+				i++
+			}
+		case strings.HasPrefix(arg, "--model="):
+			model = strings.TrimPrefix(arg, "--model=")
+		default:
+			remaining = append(remaining, arg)
+		}
+	}
+	if model != "" && logger != nil {
+		logger.Info("codex: migrating --model from custom_args to thread/start payload", "model", model)
+	}
+	return model, remaining
+}
+
 // codexBackend implements Backend by spawning `codex app-server --listen stdio://`
 // and communicating via JSON-RPC 2.0 over stdin/stdout.
 type codexBackend struct {
@@ -40,6 +71,16 @@ func (b *codexBackend) Execute(ctx context.Context, prompt string, opts ExecOpti
 		timeout = 20 * time.Minute
 	}
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
+
+	// Codex's `app-server` subcommand does not accept `-m` / `--model`; the
+	// model is selected via the `thread/start` JSON-RPC payload. If a user's
+	// custom_args still carry those tokens (historically the UI suggested
+	// CLI-style model overrides), extract them here so the process doesn't
+	// exit during initialize.
+	if extractedModel, trimmedCustom := extractCodexModelArg(opts.CustomArgs, b.cfg.Logger); extractedModel != "" {
+		opts.Model = extractedModel
+		opts.CustomArgs = trimmedCustom
+	}
 
 	codexArgs := append([]string{"app-server", "--listen", "stdio://"}, filterCustomArgs(opts.CustomArgs, codexBlockedArgs, b.cfg.Logger)...)
 	cmd := exec.CommandContext(runCtx, execPath, codexArgs...)
@@ -315,14 +356,14 @@ func (c *codexClient) startOrResumeThread(ctx context.Context, opts ExecOptions,
 // ── codexClient: JSON-RPC 2.0 transport ──
 
 type codexClient struct {
-	cfg       Config
-	stdin     interface{ Write([]byte) (int, error) }
-	mu        sync.Mutex
-	nextID    int
-	pending   map[int]*pendingRPC
-	threadID  string
-	turnID    string
-	onMessage func(Message)
+	cfg        Config
+	stdin      interface{ Write([]byte) (int, error) }
+	mu         sync.Mutex
+	nextID     int
+	pending    map[int]*pendingRPC
+	threadID   string
+	turnID     string
+	onMessage  func(Message)
 	onTurnDone func(aborted bool)
 
 	notificationProtocol string // "unknown", "legacy", "raw"

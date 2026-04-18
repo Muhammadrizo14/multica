@@ -911,3 +911,91 @@ func TestCodexProtocolDetectionLegacyBlocksRaw(t *testing.T) {
 		t.Fatal("raw notification should be ignored in legacy mode")
 	}
 }
+
+func TestExtractCodexModelArg(t *testing.T) {
+	t.Parallel()
+
+	logger := slog.Default()
+
+	cases := []struct {
+		name      string
+		in        []string
+		wantModel string
+		wantRest  []string
+	}{
+		{
+			name:      "short flag with value",
+			in:        []string{"-m", "gpt-5.4-mini"},
+			wantModel: "gpt-5.4-mini",
+			wantRest:  []string{},
+		},
+		{
+			name:      "long flag with separate value",
+			in:        []string{"--model", "gpt-5.4-mini"},
+			wantModel: "gpt-5.4-mini",
+			wantRest:  []string{},
+		},
+		{
+			name:      "long flag with inline value",
+			in:        []string{"--model=gpt-5.4-mini"},
+			wantModel: "gpt-5.4-mini",
+			wantRest:  []string{},
+		},
+		{
+			name:      "model flag among other args",
+			in:        []string{"--verbose", "-m", "o3", "--experimental"},
+			wantModel: "o3",
+			wantRest:  []string{"--verbose", "--experimental"},
+		},
+		{
+			name:      "last model specifier wins",
+			in:        []string{"-m", "first", "--model=second"},
+			wantModel: "second",
+			wantRest:  []string{},
+		},
+		{
+			name:      "no model flag passes through untouched",
+			in:        []string{"--verbose", "--experimental"},
+			wantModel: "",
+			wantRest:  []string{"--verbose", "--experimental"},
+		},
+		{
+			name:      "orphan -m with no value is dropped",
+			in:        []string{"-m"},
+			wantModel: "",
+			wantRest:  []string{},
+		},
+		{
+			name:      "empty input",
+			in:        nil,
+			wantModel: "",
+			wantRest:  nil,
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			gotModel, gotRest := extractCodexModelArg(tc.in, logger)
+			if gotModel != tc.wantModel {
+				t.Errorf("model: got %q, want %q", gotModel, tc.wantModel)
+			}
+			if !equalStringSlices(gotRest, tc.wantRest) {
+				t.Errorf("remaining: got %v, want %v", gotRest, tc.wantRest)
+			}
+		})
+	}
+}
+
+func equalStringSlices(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
