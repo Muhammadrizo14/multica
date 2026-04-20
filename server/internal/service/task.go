@@ -8,6 +8,7 @@ import (
 	"log/slog"
 
 	"strconv"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -173,30 +174,40 @@ func (s *TaskService) CancelTask(ctx context.Context, taskID pgtype.UUID) (*db.A
 // ClaimTask atomically claims the next queued task for an agent,
 // respecting max_concurrent_tasks.
 func (s *TaskService) ClaimTask(ctx context.Context, agentID pgtype.UUID) (*db.AgentTaskQueue, error) {
+	start := time.Now()
+	t0 := start
 	agent, err := s.Queries.GetAgent(ctx, agentID)
+	getAgentMs := time.Since(t0).Milliseconds()
 	if err != nil {
 		return nil, fmt.Errorf("agent not found: %w", err)
 	}
 
+	t0 = time.Now()
 	running, err := s.Queries.CountRunningTasks(ctx, agentID)
+	countRunningMs := time.Since(t0).Milliseconds()
 	if err != nil {
 		return nil, fmt.Errorf("count running tasks: %w", err)
 	}
 	if running >= int64(agent.MaxConcurrentTasks) {
 		slog.Debug("task claim: no capacity", "agent_id", util.UUIDToString(agentID), "running", running, "max", agent.MaxConcurrentTasks)
+		s.maybeLogClaimSlow(agentID, "no_capacity", start, getAgentMs, countRunningMs, 0)
 		return nil, nil // No capacity
 	}
 
+	t0 = time.Now()
 	task, err := s.Queries.ClaimAgentTask(ctx, agentID)
+	claimAgentMs := time.Since(t0).Milliseconds()
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			slog.Debug("task claim: no tasks available", "agent_id", util.UUIDToString(agentID))
+			s.maybeLogClaimSlow(agentID, "no_tasks", start, getAgentMs, countRunningMs, claimAgentMs)
 			return nil, nil // No tasks available
 		}
 		return nil, fmt.Errorf("claim task: %w", err)
 	}
 
 	slog.Info("task claimed", "task_id", util.UUIDToString(task.ID), "agent_id", util.UUIDToString(agentID))
+	s.maybeLogClaimSlow(agentID, "claimed", start, getAgentMs, countRunningMs, claimAgentMs)
 
 	// Update agent status to working
 	s.updateAgentStatus(ctx, agentID, "working")
@@ -210,29 +221,73 @@ func (s *TaskService) ClaimTask(ctx context.Context, agentID pgtype.UUID) (*db.A
 // ClaimTaskForRuntime claims the next runnable task for a runtime while
 // still respecting each agent's max_concurrent_tasks limit.
 func (s *TaskService) ClaimTaskForRuntime(ctx context.Context, runtimeID pgtype.UUID) (*db.AgentTaskQueue, error) {
+	start := time.Now()
+	t0 := start
 	tasks, err := s.Queries.ListPendingTasksByRuntime(ctx, runtimeID)
+	listMs := time.Since(t0).Milliseconds()
 	if err != nil {
 		return nil, fmt.Errorf("list pending tasks: %w", err)
 	}
 
+	loopStart := time.Now()
 	triedAgents := map[string]struct{}{}
+	var (
+		claimed     *db.AgentTaskQueue
+		agentsTried int
+	)
 	for _, candidate := range tasks {
 		agentKey := util.UUIDToString(candidate.AgentID)
 		if _, seen := triedAgents[agentKey]; seen {
 			continue
 		}
 		triedAgents[agentKey] = struct{}{}
+		agentsTried++
 
 		task, err := s.ClaimTask(ctx, candidate.AgentID)
 		if err != nil {
 			return nil, err
 		}
 		if task != nil && task.RuntimeID == runtimeID {
-			return task, nil
+			claimed = task
+			break
 		}
 	}
+	loopMs := time.Since(loopStart).Milliseconds()
+	totalMs := time.Since(start).Milliseconds()
 
-	return nil, nil
+	// Slow-only log so we can see where the time goes on the prod tail.
+	// Threshold matches the inner ClaimTask threshold (300ms).
+	if totalMs >= 300 {
+		slog.Info("claim_for_runtime slow",
+			"runtime_id", util.UUIDToString(runtimeID),
+			"total_ms", totalMs,
+			"list_pending_ms", listMs,
+			"list_pending_count", len(tasks),
+			"agents_tried", agentsTried,
+			"claim_loop_ms", loopMs,
+			"claimed", claimed != nil,
+		)
+	}
+
+	return claimed, nil
+}
+
+// maybeLogClaimSlow emits one structured log per ClaimTask call when its total
+// latency exceeds 300ms, so the prod tail can be diagnosed without flooding
+// logs at normal poll rates.
+func (s *TaskService) maybeLogClaimSlow(agentID pgtype.UUID, outcome string, start time.Time, getAgentMs, countRunningMs, claimAgentMs int64) {
+	totalMs := time.Since(start).Milliseconds()
+	if totalMs < 300 {
+		return
+	}
+	slog.Info("claim_task slow",
+		"agent_id", util.UUIDToString(agentID),
+		"outcome", outcome,
+		"total_ms", totalMs,
+		"get_agent_ms", getAgentMs,
+		"count_running_ms", countRunningMs,
+		"claim_agent_ms", claimAgentMs,
+	)
 }
 
 // StartTask transitions a dispatched task to running.
