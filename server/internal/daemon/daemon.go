@@ -496,9 +496,59 @@ func (d *Daemon) heartbeatLoop(ctx context.Context) {
 				if resp.PendingUpdate != nil {
 					go d.handleUpdate(ctx, rid, resp.PendingUpdate)
 				}
+
+				// Handle pending model-list requests.
+				if resp.PendingModelList != nil {
+					rt := d.findRuntime(rid)
+					if rt != nil {
+						go d.handleModelList(ctx, *rt, resp.PendingModelList.ID)
+					}
+				}
 			}
 		}
 	}
+}
+
+// handleModelList resolves the provider's supported models (via static
+// catalog or by shelling out to the agent CLI) and reports the result
+// back to the server. Model discovery failures are reported as empty
+// lists rather than errors so the UI can still render a creatable
+// dropdown.
+func (d *Daemon) handleModelList(ctx context.Context, rt Runtime, requestID string) {
+	d.logger.Info("model list requested", "runtime_id", rt.ID, "request_id", requestID, "provider", rt.Provider)
+
+	entry, ok := d.cfg.Agents[rt.Provider]
+	if !ok {
+		d.client.ReportModelListResult(ctx, rt.ID, requestID, map[string]any{
+			"status": "failed",
+			"error":  fmt.Sprintf("no agent configured for provider %q", rt.Provider),
+		})
+		return
+	}
+
+	models, err := agent.ListModels(ctx, rt.Provider, entry.Path)
+	if err != nil {
+		d.client.ReportModelListResult(ctx, rt.ID, requestID, map[string]any{
+			"status": "failed",
+			"error":  err.Error(),
+		})
+		return
+	}
+
+	// Wire format matches handler.ModelEntry.
+	wire := make([]map[string]string, 0, len(models))
+	for _, m := range models {
+		wire = append(wire, map[string]string{
+			"id":       m.ID,
+			"label":    m.Label,
+			"provider": m.Provider,
+		})
+	}
+	d.client.ReportModelListResult(ctx, rt.ID, requestID, map[string]any{
+		"status":    "completed",
+		"models":    wire,
+		"supported": agent.ModelSelectionSupported(rt.Provider),
+	})
 }
 
 func (d *Daemon) handlePing(ctx context.Context, rt Runtime, pingID string) {
@@ -1018,9 +1068,25 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, taskLo
 		customArgs = task.Agent.CustomArgs
 		mcpConfig = task.Agent.McpConfig
 	}
+	// Resolve model with a three-tier fallback so the dropdown's
+	// "Default (provider)" empty state is meaningful at execution
+	// time:
+	//   1. per-agent agent.model (UI dropdown explicit choice)
+	//   2. MULTICA_<PROVIDER>_MODEL env var (operator override)
+	//   3. agent.DefaultModel(provider) (provider's recommended)
+	model := ""
+	if task.Agent != nil && task.Agent.Model != "" {
+		model = task.Agent.Model
+	}
+	if model == "" {
+		model = entry.Model
+	}
+	if model == "" {
+		model = agent.DefaultModel(provider)
+	}
 	execOpts := agent.ExecOptions{
 		Cwd:             env.WorkDir,
-		Model:           entry.Model,
+		Model:           model,
 		Timeout:         d.cfg.AgentTimeout,
 		ResumeSessionID: task.PriorSessionID,
 		CustomArgs:      customArgs,
