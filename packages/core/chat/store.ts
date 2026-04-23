@@ -165,10 +165,15 @@ export function createChatStore(options: ChatStoreOptions) {
       nextAgent,
       draftCount: Object.keys(nextDrafts).length,
     });
+    // lastAnchorLocation is not persisted — reset it here so a pathname
+    // captured in the previous workspace can't be reused against the new
+    // workspace's wsId (would trigger a cross-workspace issue/project fetch
+    // and silently leak context into chat messages).
     store.setState({
       activeSessionId: nextSession,
       selectedAgentId: nextAgent,
       inputDrafts: nextDrafts,
+      lastAnchorLocation: null,
     });
   });
 
